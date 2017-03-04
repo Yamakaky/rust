@@ -97,7 +97,110 @@ fn filter_frames(_frames: &[Frame],
                  _format: PrintFormat,
                  _context: &BacktraceContext) -> (usize, usize)
 {
-    (0, 0)
+    if format == PrintFormat::Full {
+        return (0, 0);
+    }
+
+    // We want to filter out frames with some prefixes
+    // from both top and bottom of the call stack.
+    static BAD_PREFIXES_TOP: &'static [&'static str] = &[
+        "_ZN3std3sys3imp9backtrace",
+        "ZN3std3sys3imp9backtrace",
+        "std::sys::imp::backtrace",
+        "_ZN3std10sys_common9backtrace",
+        "ZN3std10sys_common9backtrace",
+        "std::sys_common::backtrace",
+        "_ZN3std9panicking",
+        "ZN3std9panicking",
+        "std::panicking",
+        "_ZN4core9panicking",
+        "ZN4core9panicking",
+        "core::panicking",
+        "_ZN4core6result13unwrap_failed",
+        "ZN4core6result13unwrap_failed",
+        "core::result::unwrap_failed",
+        "rust_begin_unwind",
+        "_ZN4drop",
+        "mingw_set_invalid_parameter_handler",
+    ];
+    static BAD_PREFIXES_BOTTOM: &'static [&'static str] = &[
+        "_ZN3std9panicking",
+        "ZN3std9panicking",
+        "std::panicking",
+        "_ZN3std5panic",
+        "ZN3std5panic",
+        "std::panic",
+        "_ZN4core9panicking",
+        "ZN4core9panicking",
+        "core::panicking",
+        "_ZN3std2rt10lang_start",
+        "ZN3std2rt10lang_start",
+        "std::rt::lang_start",
+        "panic_unwind::__rust_maybe_catch_panic",
+        "__rust_maybe_catch_panic",
+        "_rust_maybe_catch_panic",
+        "__libc_start_main",
+        "__rust_try",
+        "_start",
+        "main",
+        "BaseThreadInitThunk",
+        "RtlInitializeExceptionChain",
+        "__scrt_common_main_seh",
+        "_ZN4drop",
+        "mingw_set_invalid_parameter_handler",
+        "_ZN4core3ops6FnOnce9call_once",
+        "ZN4core3ops6FnOnce9call_once",
+        "core::ops::FnOnce::call_once",
+
+        // tests
+        "_ZN91_$LT$std..panic..AssertUnwindSafe$LT$F$GT$$u20$as$u20$core..ops..FnOnce$LT$$LP$$RP$$GT$$GT$9call_once",
+        "ZN91_$LT$std..panic..AssertUnwindSafe$LT$F$GT$$u20$as$u20$core..ops..FnOnce$LT$$LP$$RP$$GT$$GT$9call_once",
+        "<std::panic::AssertUnwindSafe<F> as core::ops::FnOnce<()>>::call_once",
+        "_ZN4test8run_test",
+        "ZN4test8run_test",
+        "test::run_test",
+        "_ZN42_$LT$F$u20$as$u20$test..FnBox$LT$T$GT$$GT$8call_box",
+        "ZN42_$LT$F$u20$as$u20$test..FnBox$LT$T$GT$$GT$8call_box",
+        "<F as test::FnBox<T>>::call_box",
+
+    ];
+
+    let is_good_frame = |frame: Frame, bad_prefixes: &[&str]| {
+        resolve_symname(frame, |symname| {
+            if let Some(mangled_symbol_name) = symname {
+                if !bad_prefixes.iter().any(|s| mangled_symbol_name.starts_with(s)) {
+                    return Ok(())
+                }
+            }
+            Err(io::Error::from(io::ErrorKind::Other))
+        }, context).is_ok()
+    };
+
+    let skipped_before = frames.iter().position(|frame| {
+        is_good_frame(*frame, BAD_PREFIXES_TOP)
+    }).unwrap_or(frames.len());
+    let idx_catch_panic = skipped_before + frames[skipped_before..].iter().position(|frame| {
+        let mut is_rmcp = false;
+        let _ = resolve_symname(*frame, |symname| {
+            if let Some(mangled_symbol_name) = symname {
+                if mangled_symbol_name == "__rust_maybe_catch_panic" {
+                    is_rmcp = true;
+                }
+            }
+            Ok(())
+        }, context);
+        is_rmcp
+    }).unwrap_or(0);
+    let skipped_after = frames.len() - idx_catch_panic + frames[skipped_before..idx_catch_panic].iter().rev().position(|frame| {
+        is_good_frame(*frame, BAD_PREFIXES_BOTTOM)
+    }).unwrap_or(0);
+
+    if skipped_before + skipped_after >= frames.len() {
+        // Avoid showing completely empty backtraces
+        return (0, 0);
+    }
+
+    (skipped_before, skipped_after)
 }
 
 /// Controls how the backtrace should be formated.
